@@ -77,6 +77,13 @@ backup
 write_settings --arg cmd "$COMMAND" '.statusLine = {type: "command", command: $cmd}'
 echo "set .statusLine in $SETTINGS"
 
+# The odometer's first scan reads every transcript, which takes seconds. Doing it
+# now, detached, means the first prompt after a restart already has a number.
+if [ -d "$CLAUDE_DIR/projects" ]; then
+  echo "warming the token odometer cache in the background"
+  ("$TARGET" --refresh >/dev/null 2>&1 </dev/null &) >/dev/null 2>&1
+fi
+
 now=$(date +%s)
 sample=$(printf '{"model":{"display_name":"Opus 5"},"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":%s},"seven_day":{"used_percentage":24,"resets_at":%s}}}' \
   "$((now + 10800))" "$((now + 181440))")
