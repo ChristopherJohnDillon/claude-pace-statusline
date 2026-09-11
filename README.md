@@ -160,8 +160,20 @@ files rather than messages inflated the total by 90% on the author's own history
 message is therefore banked under its `message.id` in a side index, and an id already
 banked is skipped however many copies of it turn up.
 
-One consequence: an id stays banked even if you later delete the transcript it came from,
-so the total is a high-water mark and never runs backwards when you tidy up.
+One consequence: an id stays banked even if the transcript it came from is later gone, so
+the total is a high-water mark and never runs backwards.
+
+That is not a hypothetical. Claude Code deletes transcripts after `cleanupPeriodDays`,
+which defaults to 30, so `~/.claude/projects` is a rolling window rather than a complete
+history — on a default setup the oldest file is always about a month old, however long you
+have been using it. The odometer keeps counting past that, because banked ids outlive the
+files. Which means the span cannot be read off the transcripts: doing so would pin it at
+30 days while the totals kept growing, and the monthly rate would inflate without bound.
+The earliest date ever observed is therefore recorded once and only ever moves backwards.
+
+The practical limit is that the first install can only see as far back as retention left
+intact. Whatever you ran before that is not in the number, and the odometer starts from
+the month it can see.
 
 A transcript being written to mid-refresh ends in a half-written line; only whole lines
 are counted, and the stored byte offset advances only over those, so the fragment is

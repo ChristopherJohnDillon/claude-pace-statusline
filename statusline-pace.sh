@@ -216,9 +216,20 @@ refresh_cache() {
   awk -F'\t' '{ i += $2; o += $3; w5 += $4; w1 += $5; r += $6 }
     END { printf "%d\t%d\t%d\t%d\t%d\n", i, o, w5, w1, r }' "$idx" >"$sum" 2>/dev/null
 
-  # The span the odometer covers, taken from the transcripts still on disk
-  awk -F'\t' 'NR > 1 && $3 + 0 > 0 { m = $3 + 0; if (oldest == 0 || m < oldest) oldest = m }
-    END { print oldest + 0 }' "$keep" >>"$sum" 2>/dev/null
+  # The span the odometer covers. This cannot be read off the transcripts, because
+  # Claude Code deletes them after cleanupPeriodDays (30 by default) while banked
+  # message ids stay in the index forever. Taking the oldest file on disk would
+  # pin the span at 30 days while the totals kept growing, inflating the monthly
+  # rate without bound. So the earliest date ever observed is recorded once and
+  # only ever moves backwards.
+  local seen_before=0
+  [ -r "$PACE_SUM" ] && seen_before=$(awk 'NR == 2 { print $1 + 0 }' "$PACE_SUM" 2>/dev/null)
+  awk -F'\t' -v prev="${seen_before:-0}" '
+    NR > 1 && $3 + 0 > 0 { m = $3 + 0; if (oldest == 0 || m < oldest) oldest = m }
+    END {
+      if (prev > 0 && (oldest == 0 || prev < oldest)) oldest = prev
+      print oldest + 0
+    }' "$keep" >>"$sum" 2>/dev/null
 
   # Swapped in whole, so a reader never sees a half-written cache
   mv "$idx" "$PACE_IDX" 2>/dev/null && chmod 644 "$PACE_IDX" 2>/dev/null
