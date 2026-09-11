@@ -73,6 +73,24 @@ cd claude-pace-statusline
 The installer copies the script to `~/.claude/statusline-pace.sh`, backs up
 `~/.claude/settings.json`, and points `statusLine` at it. Restart Claude Code to see it.
 
+On a terminal it asks two questions first, defaulting to whatever you already have — so
+re-running it to change one answer won't reset the other:
+
+```
+show the token odometer (⚡ 15.6B ≈ $11.8k)? [Y/n]
+monthly plan cost, for the × plan comparison? [200]
+```
+
+Answers are written into the `statusLine` command as an environment prefix, so there is
+no second config file to keep in step. To skip the questions — piping from `curl` skips
+them automatically — answer on the command line instead:
+
+```bash
+./install.sh --yes          # accept the defaults without asking
+./install.sh --plan 100     # set the plan cost
+./install.sh --no-tokens    # install the pace segments only
+```
+
 If you already have a status line configured, the installer stops and shows you what's
 there rather than overwriting it. Pass `--force` to replace it anyway (you still get a
 backup).
