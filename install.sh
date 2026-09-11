@@ -89,7 +89,7 @@ ask_value() {
 
 if [ "$interactive" = 1 ]; then
   echo
-  [ -n "$tokens" ] || tokens=$(ask_yes_no "show the token odometer (⚡ 15.6B ≈ \$11.8k)?" "$default_tokens")
+  [ -n "$tokens" ] || tokens=$(ask_yes_no "show the token odometer (⚡ 8.17B/32d ≈ \$5.87k)?" "$default_tokens")
   if [ "$tokens" = 1 ] && [ -z "$plan" ]; then
     plan=$(ask_value "monthly plan cost, for the × plan comparison?" "$default_plan")
   fi

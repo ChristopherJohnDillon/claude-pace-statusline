@@ -13,7 +13,7 @@ know is whether you're spending faster than time is passing.
 So this prints both:
 
 ```
-5h 20%/45% (2h44m) │ 7d 25%/21% (5d12h) │ ⚡ 8.17B ≈ $5.87k · 28× plan │ Opus 5
+5h 20%/45% (2h44m) │ 7d 25%/21% (5d12h) │ ⚡ 8.17B/32d ≈ $5.87k · 28× plan │ Opus 5
    │   │     └ time until this window resets
    │   └ percent of the window elapsed
    └ percent of the quota spent
@@ -38,10 +38,11 @@ under `~/.claude/projects`, counted once each, what that would have cost at stan
 rates, and how that compares to your subscription.
 
 ```
-⚡ 8.17B ≈ $5.87k · 28× plan
-  │       │          └ monthly API equivalent ÷ what you pay (PACE_PLAN, default $200)
-  │       └ priced at list rates, per token class
-  └ input + output + cache writes + cache reads, all time
+⚡ 8.17B/32d ≈ $5.87k · 28× plan
+  │      │      │        └ monthly API equivalent ÷ what you pay (PACE_PLAN, default $200)
+  │      │      └ priced at list rates, per token class
+  │      └ how far back the count reaches
+  └ input + output + cache writes + cache reads, counted once each
 ```
 
 It is worth knowing what the dollar figure is and isn't. It prices the tokens you
@@ -52,8 +53,11 @@ not what Anthropic charges you, and not comparable to a usage dashboard. Cache r
 usually dominate the token count while contributing a fraction of the cost, which is
 most of why the multiple gets as large as it does.
 
-The multiple divides that spend by the span your transcripts actually cover, so it is a
-rate, not a running total. It appears only once there is more than a day of history to
+The span is printed next to the count because the count means nothing without it — 8B
+reads very differently as a month than as a year — and because it is the number the
+multiple divides by, so the arithmetic is visible rather than implied.
+
+The multiple divides that spend by that span, so it is a rate, not a running total. It appears only once there is more than a day of history to
 divide by, and only when it clears 1.5× — below that it is noise.
 
 **It costs nothing to display.** The status line is a shell command the Claude Code
@@ -77,7 +81,7 @@ On a terminal it asks two questions first, defaulting to whatever you already ha
 re-running it to change one answer won't reset the other:
 
 ```
-show the token odometer (⚡ 8.17B ≈ $5.87k)? [Y/n]
+show the token odometer (⚡ 8.17B/32d ≈ $5.87k)? [Y/n]
 monthly plan cost, for the × plan comparison? [200]
 ```
 

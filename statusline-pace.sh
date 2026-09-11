@@ -47,8 +47,8 @@ PACE_CACHE=${PACE_CACHE:-$HOME/.claude/.cache/pace-tokens.tsv}
 # .tsv  one line per transcript: how far into it we have read
 # .idx  one line per unique message id: what that message cost
 # .sum  a single line of totals, which is all the status line ever reads
-PACE_IDX="${PACE_CACHE%.tsv}.idx"
-PACE_SUM="${PACE_CACHE%.tsv}.sum"
+PACE_IDX=${PACE_IDX:-${PACE_CACHE%.tsv}.idx}
+PACE_SUM=${PACE_SUM:-${PACE_CACHE%.tsv}.sum}
 CACHE_VERSION="#v2"
 
 # Standard-tier Opus rates, dollars per million tokens. Cache writes are 1.25x
@@ -355,6 +355,12 @@ tokens_segment() {
       if (n >= 1e3) return sig(n / 1e3) "K"
       return sprintf("%d", n)
     }
+    # Days while that is still legible, months once it is not
+    function fmtspan(d) {
+      if (d >= 365) return sprintf("%.1fy", d / 365.25)
+      if (d >= 60) return sprintf("%dmo", int(d / 30.44 + 0.5))
+      return sprintf("%dd", int(d + 0.5))
+    }
     function money(d) {
       if (d >= 1e6) return "$" sig(d / 1e6) "M"
       if (d >= 1e3) return "$" sig(d / 1e3) "k"
@@ -367,7 +373,14 @@ tokens_segment() {
     END {
       total = i + o + w5 + w1 + r
       if (total <= 0) exit 1
-      out = amber bolt " " hnum(total) reset
+      # The token count is meaningless without the window it accumulated over —
+      # "8B" reads very differently as a month than as a year
+      span = ""
+      if (oldest > 0) {
+        days = (now - oldest) / 86400
+        if (days >= 1) span = gray "/" fmtspan(days) reset
+      }
+      out = amber bolt " " hnum(total) reset span
       if (showcost != 0) {
         dollars = (i * rin + o * rout + w5 * rw5 + w1 * rw1 + r * rr) / 1000000
         out = out gray " " approx " " money(dollars) reset
