@@ -122,19 +122,31 @@ refresh_cache() {
   [ -d "$PACE_TOKENS_DIR" ] || return 0
   local cache=$PACE_CACHE lock="${PACE_CACHE}.lock" listing plan keep
   mkdir -p "$(dirname "$cache")" 2>/dev/null || return 0
-  # A lock younger than ten minutes means a refresh is genuinely in flight; an
-  # older one was left by a process that died, and is cleared rather than obeyed
-  if [ -d "$lock" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
-    return 0
+  # Whoever holds the lock records their pid in it. A refresh that is killed
+  # before its trap runs — a terminal closing on the first, slow scan is the
+  # usual way — would otherwise leave a directory that blocks every later
+  # refresh, so the holder is checked for being alive rather than merely recent.
+  if ! mkdir "$lock" 2>/dev/null; then
+    holder=$(cat "$lock/pid" 2>/dev/null)
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+      return 0
+    fi
+    # Nobody is home, or a pid too old to trust. Take it over.
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ] || [ -z "$holder" ] \
+       || ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$lock"
+      mkdir "$lock" 2>/dev/null || return 0
+    else
+      return 0
+    fi
   fi
-  rmdir "$lock" 2>/dev/null
-  mkdir "$lock" 2>/dev/null || return 0
+  echo $$ >"$lock/pid" 2>/dev/null
   listing=$(mktemp "${TMPDIR:-/tmp}/pace-list.XXXXXX")
   plan=$(mktemp "${TMPDIR:-/tmp}/pace-plan.XXXXXX")
   keep=$(mktemp "${TMPDIR:-/tmp}/pace-keep.XXXXXX")
   # Expanded now, not at exit: these names are local and are gone by the time
   # the trap fires
-  trap "rm -f '$listing' '$plan' '$keep'; rmdir '$lock' 2>/dev/null" EXIT
+  trap "rm -f '$listing' '$plan' '$keep'; rm -rf '$lock'" EXIT
   # awk refuses to run at all if an input file is missing, and on the very first
   # refresh there is no cache yet
   [ -f "$cache" ] || : >"$cache"
