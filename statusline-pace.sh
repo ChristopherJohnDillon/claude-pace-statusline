@@ -43,6 +43,13 @@ PACE_TOKENS=${PACE_TOKENS:-1}
 PACE_COST=${PACE_COST:-1}
 PACE_TOKENS_DIR=${PACE_TOKENS_DIR:-$HOME/.claude/projects}
 PACE_CACHE=${PACE_CACHE:-$HOME/.claude/.cache/pace-tokens.tsv}
+# Three files, because deduplicating and rendering want different shapes.
+# .tsv  one line per transcript: how far into it we have read
+# .idx  one line per unique message id: what that message cost
+# .sum  a single line of totals, which is all the status line ever reads
+PACE_IDX="${PACE_CACHE%.tsv}.idx"
+PACE_SUM="${PACE_CACHE%.tsv}.sum"
+CACHE_VERSION="#v2"
 
 # Standard-tier Opus rates, dollars per million tokens. Cache writes are 1.25x
 # input at the 5-minute TTL and 2x at the one-hour TTL; cache reads are 0.1x.
@@ -71,14 +78,15 @@ else
   list_sizes() { find "$1" -type f -name '*.jsonl' -print0 | xargs -0 stat -c '%s %Y %n' 2>/dev/null; }
 fi
 
-# Sum the usage records in one transcript from byte $2 onward. Prints
-# consumed-bytes and the five token counts, tab separated.
+# Read one transcript from byte $2 onward, appending a record per assistant
+# message to $3 as: id, input, output, 5m-write, 1h-write, read. Prints how many
+# bytes were consumed.
 #
 # A transcript is appended to while Claude Code is running, so the tail may be a
-# half-written line. Only whole lines are counted, and the byte offset advances
-# only over those, which leaves the fragment to be read once it is complete.
+# half-written line. Only whole lines are read, and the byte offset advances only
+# over those, which leaves the fragment to be picked up once it is complete.
 scan_transcript() {
-  local f=$1 off=$2 chunk sz cut sums
+  local f=$1 off=$2 out=$3 chunk sz cut
   chunk=$(mktemp "${TMPDIR:-/tmp}/pace-chunk.XXXXXX") || return 1
   if [ "$off" -gt 0 ]; then
     tail -c "+$((off + 1))" "$f" >"$chunk" 2>/dev/null
@@ -94,33 +102,43 @@ scan_transcript() {
   fi
   if [ "$cut" -le 0 ]; then
     rm -f "$chunk"
-    printf '0\t0\t0\t0\t0\t0'
+    printf 0
     return 0
   fi
-  sums=$(head -c "$cut" "$chunk" | jq -n -r '
-    reduce (inputs | .message.usage? // empty) as $u ([0,0,0,0,0];
-      ($u.cache_creation // null) as $cc
-      # Older records carry only a flat cache_creation_input_tokens; bill those
-      # at the 5-minute rate, which is the default TTL they were written under
-      | (if $cc then ($cc.ephemeral_5m_input_tokens // 0)
-         else ($u.cache_creation_input_tokens // 0) end) as $c5
-      | (if $cc then ($cc.ephemeral_1h_input_tokens // 0) else 0 end) as $c1
-      | [ .[0] + ($u.input_tokens // 0),
-          .[1] + ($u.output_tokens // 0),
-          .[2] + $c5,
-          .[3] + $c1,
-          .[4] + ($u.cache_read_input_tokens // 0) ])
-    | @tsv') || { rm -f "$chunk"; return 1; }
+  # Read as raw lines and parse each one on its own: a single corrupt line in a
+  # transcript would otherwise fail the whole invocation, and since the byte
+  # offset only advances on success, that file would never be read again
+  head -c "$cut" "$chunk" | jq -n -R -r '
+    inputs
+    | (fromjson? // empty)
+    | select((.message | type) == "object" and (.message.usage | type) == "object")
+    | .message.usage as $u
+    | ($u.cache_creation // null) as $cc
+    # Older records carry only a flat cache_creation_input_tokens; bill those at
+    # the 5-minute rate, which is the default TTL they were written under
+    | [ (.message.id // ""),
+        ($u.input_tokens // 0),
+        ($u.output_tokens // 0),
+        (if $cc then ($cc.ephemeral_5m_input_tokens // 0)
+         else ($u.cache_creation_input_tokens // 0) end),
+        (if $cc then ($cc.ephemeral_1h_input_tokens // 0) else 0 end),
+        ($u.cache_read_input_tokens // 0) ]
+    | @tsv' >>"$out" 2>/dev/null || { rm -f "$chunk"; return 1; }
   rm -f "$chunk"
-  [ -n "$sums" ] || return 1
-  printf '%s\t%s' "$cut" "$sums"
+  printf '%s' "$cut"
 }
 
-# Rebuild the odometer cache, reading only bytes that are new since last time.
+# Rebuild the odometer, reading only bytes that are new since last time.
 # Runs detached from the status line, so its cost is never on the prompt's path.
+#
+# Deduplication is the whole reason this is not a simple per-file sum. Resuming a
+# session copies the earlier conversation into the new transcript, so one
+# assistant message can sit in a dozen files; counting files would count it a
+# dozen times. Messages are therefore banked by id, and an id already known is
+# skipped however many times it reappears.
 refresh_cache() {
   [ -d "$PACE_TOKENS_DIR" ] || return 0
-  local cache=$PACE_CACHE lock="${PACE_CACHE}.lock" listing plan keep
+  local cache=$PACE_CACHE lock="${PACE_CACHE}.lock" listing plan keep records idx sum holder
   mkdir -p "$(dirname "$cache")" 2>/dev/null || return 0
   # Whoever holds the lock records their pid in it. A refresh that is killed
   # before its trap runs — a terminal closing on the first, slow scan is the
@@ -131,37 +149,39 @@ refresh_cache() {
     if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
       return 0
     fi
-    # Nobody is home, or a pid too old to trust. Take it over.
-    if [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ] || [ -z "$holder" ] \
-       || ! kill -0 "$holder" 2>/dev/null; then
-      rm -rf "$lock"
-      mkdir "$lock" 2>/dev/null || return 0
-    else
-      return 0
-    fi
+    rm -rf "$lock"
+    mkdir "$lock" 2>/dev/null || return 0
   fi
   echo $$ >"$lock/pid" 2>/dev/null
   listing=$(mktemp "${TMPDIR:-/tmp}/pace-list.XXXXXX")
   plan=$(mktemp "${TMPDIR:-/tmp}/pace-plan.XXXXXX")
   keep=$(mktemp "${TMPDIR:-/tmp}/pace-keep.XXXXXX")
+  records=$(mktemp "${TMPDIR:-/tmp}/pace-rec.XXXXXX")
+  idx=$(mktemp "${TMPDIR:-/tmp}/pace-idx.XXXXXX")
+  sum=$(mktemp "${TMPDIR:-/tmp}/pace-sum.XXXXXX")
   # Expanded now, not at exit: these names are local and are gone by the time
   # the trap fires
-  trap "rm -f '$listing' '$plan' '$keep'; rm -rf '$lock'" EXIT
-  # awk refuses to run at all if an input file is missing, and on the very first
-  # refresh there is no cache yet
-  [ -f "$cache" ] || : >"$cache"
+  trap "rm -f '$listing' '$plan' '$keep' '$records' '$idx' '$sum'; rm -rf '$lock'" EXIT
+
+  # A cache written by an older version stored per-file sums and cannot be
+  # migrated, since it never recorded which messages it had counted. Start over.
+  if [ ! -f "$cache" ] || [ "$(head -n 1 "$cache" 2>/dev/null)" != "$CACHE_VERSION" ]; then
+    printf '%s\n' "$CACHE_VERSION" >"$cache"
+    : >"$PACE_IDX"
+  fi
+  [ -f "$PACE_IDX" ] || : >"$PACE_IDX"
+
   list_sizes "$PACE_TOKENS_DIR" >"$listing"
   [ -s "$listing" ] || return 0
-  # Split the transcripts into those whose cached entry still stands and those
-  # with bytes to read. A file shorter than its offset was truncated or replaced,
-  # so it starts over at zero.
+
+  # Split the transcripts into those already read to the end and those with
+  # bytes to read. A file shorter than its offset was truncated or replaced, so
+  # it starts over at zero.
+  printf '%s\n' "$CACHE_VERSION" >"$keep"
   awk -F'\t' -v OFS='\t' -v plan="$plan" -v keep="$keep" -v cachefile="$cache" '
     # Keyed on the filename rather than NR==FNR, which would misread the first
     # listing record as a cache record whenever the cache is empty
-    FILENAME == cachefile {
-      if (NF >= 7) { off[$1] = $2; i[$1] = $3; o[$1] = $4; w5[$1] = $5; w1[$1] = $6; r[$1] = $7 }
-      next
-    }
+    FILENAME == cachefile { if (NF >= 3) off[$1] = $2; next }
     {
       sp = index($0, " ")
       if (sp == 0) next
@@ -171,20 +191,38 @@ refresh_cache() {
       if (sp2 == 0) next
       mtime = substr(rest, 1, sp2 - 1) + 0
       path = substr(rest, sp2 + 1)
-      if (path in off && off[path] == size)
-        print path, off[path], i[path], o[path], w5[path], w1[path], r[path], mtime >keep
-      else if (path in off && off[path] < size)
-        print path, off[path], i[path], o[path], w5[path], w1[path], r[path], mtime >plan
-      else
-        print path, 0, 0, 0, 0, 0, 0, mtime >plan
+      if (path in off && off[path] == size) print path, off[path], mtime >>keep
+      else if (path in off && off[path] < size) print path, off[path], mtime >plan
+      else print path, 0, mtime >plan
     }' "$cache" "$listing" 2>/dev/null
-  while IFS=$'\t' read -r path off ti to tw5 tw1 tr mtime; do
-    delta=$(scan_transcript "$path" "$off") || continue
-    IFS=$'\t' read -r dc di do_ dw5 dw1 dr <<<"$delta"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$path" "$((off + dc))" \
-      "$((ti + di))" "$((to + do_))" "$((tw5 + dw5))" "$((tw1 + dw1))" "$((tr + dr))" "$mtime" >>"$keep"
+
+  while IFS=$'\t' read -r path off mtime; do
+    consumed=$(scan_transcript "$path" "$off" "$records") || continue
+    printf '%s\t%s\t%s\n' "$path" "$((off + consumed))" "$mtime" >>"$keep"
   done <"$plan"
+
+  # Bank the messages we have not seen before, then total the whole index. An id
+  # is banked once and never revised, so a message counts exactly once no matter
+  # how many transcripts ended up holding a copy of it.
+  awk -F'\t' -v OFS='\t' -v idxfile="$PACE_IDX" '
+    FILENAME == idxfile { seen[$1] = 1; print; next }
+    {
+      # A record without an id cannot be deduplicated, so it is always counted
+      if ($1 != "" && ($1 in seen)) next
+      if ($1 != "") seen[$1] = 1
+      print
+    }' "$PACE_IDX" "$records" >"$idx" 2>/dev/null
+
+  awk -F'\t' '{ i += $2; o += $3; w5 += $4; w1 += $5; r += $6 }
+    END { printf "%d\t%d\t%d\t%d\t%d\n", i, o, w5, w1, r }' "$idx" >"$sum" 2>/dev/null
+
+  # The span the odometer covers, taken from the transcripts still on disk
+  awk -F'\t' 'NR > 1 && $3 + 0 > 0 { m = $3 + 0; if (oldest == 0 || m < oldest) oldest = m }
+    END { print oldest + 0 }' "$keep" >>"$sum" 2>/dev/null
+
   # Swapped in whole, so a reader never sees a half-written cache
+  mv "$idx" "$PACE_IDX" 2>/dev/null && chmod 644 "$PACE_IDX" 2>/dev/null
+  mv "$sum" "$PACE_SUM" 2>/dev/null && chmod 644 "$PACE_SUM" 2>/dev/null
   mv "$keep" "$cache" 2>/dev/null && chmod 644 "$cache" 2>/dev/null
   return 0
 }
@@ -281,11 +319,12 @@ segment() {
     "$GRAY" "$pace" "$($fmt "$left")" "$RESET"
 }
 
-# The odometer, read from whatever the last background refresh left behind. No
-# transcript is opened here — the whole point is that the prompt never waits.
+# The odometer, read from whatever the last background refresh left behind. Two
+# lines of arithmetic regardless of how much history has accumulated — no
+# transcript, and no message index, is opened on the prompt's path.
 tokens_segment() {
   [ "$PACE_TOKENS" != 0 ] || return 0
-  [ -r "$PACE_CACHE" ] || return 0
+  [ -r "$PACE_SUM" ] || return 0
   awk -F'\t' \
     -v rin="$PACE_RATE_IN" -v rout="$PACE_RATE_OUT" -v rw5="$PACE_RATE_W5" \
     -v rw1="$PACE_RATE_W1" -v rr="$PACE_RATE_READ" \
@@ -311,11 +350,9 @@ tokens_segment() {
       if (d >= 10) return sprintf("$%d", d + 0.5)
       return sprintf("$%.2f", d)
     }
-    {
-      i += $3; o += $4; w5 += $5; w1 += $6; r += $7
-      m = $8 + 0
-      if (m > 0 && (oldest == 0 || m < oldest)) oldest = m
-    }
+    # Two lines: the totals, then the oldest transcript timestamp
+    NR == 1 { i = $1; o = $2; w5 = $3; w1 = $4; r = $5 }
+    NR == 2 { oldest = $1 + 0 }
     END {
       total = i + o + w5 + w1 + r
       if (total <= 0) exit 1
@@ -334,7 +371,7 @@ tokens_segment() {
         }
       }
       print out
-    }' "$PACE_CACHE" 2>/dev/null
+    }' "$PACE_SUM" 2>/dev/null
 }
 
 # Only windows the payload actually reported get a segment, so API-key and

@@ -17,15 +17,20 @@ mkdir -p "$transcripts"
 # rendered figures can be checked by hand: 10.8B tokens, and at the standard
 # Opus rates (5 / 25 / 6.25 / 10 / 0.5 per MTok) exactly $14,000.
 usage() {
-  printf '{"message":{"usage":{"input_tokens":%s,"output_tokens":%s,"cache_creation":{"ephemeral_5m_input_tokens":%s,"ephemeral_1h_input_tokens":%s},"cache_read_input_tokens":%s}}}\n' "$@"
+  printf '{"message":{"id":"%s","usage":{"input_tokens":%s,"output_tokens":%s,"cache_creation":{"ephemeral_5m_input_tokens":%s,"ephemeral_1h_input_tokens":%s},"cache_read_input_tokens":%s}}}\n' "$@"
 }
 {
-  usage 100000000 200000000 400000000 100000000 10000000000
-  usage 0 0 0 0 0
+  usage msg_one 100000000 200000000 400000000 100000000 10000000000
+  usage msg_two 0 0 0 0 0
   # A half-written final line, as a live session always has. It must be ignored
   # rather than counted or crashed on, and must not advance the byte offset.
-  printf '{"message":{"usage":{"input_tokens":999999999,"outp'
+  printf '{"message":{"id":"msg_partial","usage":{"input_tokens":999999999,"outp'
 } > "$transcripts/session.jsonl"
+
+# Resuming a session copies the earlier conversation into the new transcript, so
+# the same message id sits in both files. If these were counted per file rather
+# than per message the fixture would read 21.6B instead of 10.8B.
+cp "$transcripts/session.jsonl" "$transcripts/resumed.jsonl"
 
 # A month ago, so the plan multiple has a span to divide by
 touch -t "$(date -v-31d '+%Y%m%d%H%M' 2>/dev/null || date -d '31 days ago' '+%Y%m%d%H%M')" \
@@ -71,7 +76,7 @@ render "no rate limits reported" \
 render "rate limits, no model" \
   "$(payload 50 7200 50 302400 | jq 'del(.model)')"
 echo
-echo "  odometer (fixture: 10.8B tokens = \$14,000 over ~1 month)"
+echo "  odometer (10.8B = \$14,000/month; the transcript is duplicated by a resume)"
 echo "  ------------------------------------------------------------------------"
 render_tokens "default"                  X=1
 render_tokens "PACE_COST=0"              PACE_COST=0

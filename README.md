@@ -13,7 +13,7 @@ know is whether you're spending faster than time is passing.
 So this prints both:
 
 ```
-5h 20%/45% (2h44m) │ 7d 25%/21% (5d12h) │ ⚡ 15.6B ≈ $11.8k · 56× plan │ Opus 5
+5h 20%/45% (2h44m) │ 7d 25%/21% (5d12h) │ ⚡ 8.17B ≈ $5.87k · 28× plan │ Opus 5
    │   │     └ time until this window resets
    │   └ percent of the window elapsed
    └ percent of the quota spent
@@ -34,12 +34,12 @@ The usage number is colored by that comparison, so you don't have to do the arit
 ## The odometer
 
 The `⚡` segment is the other half of the picture: every token in every transcript
-under `~/.claude/projects`, what that would have cost at standard Opus API rates, and
-how that compares to your subscription.
+under `~/.claude/projects`, counted once each, what that would have cost at standard Opus API
+rates, and how that compares to your subscription.
 
 ```
-⚡ 15.6B ≈ $11.8k · 56× plan
-  │       │         └ monthly API equivalent ÷ what you pay (PACE_PLAN, default $200)
+⚡ 8.17B ≈ $5.87k · 28× plan
+  │       │          └ monthly API equivalent ÷ what you pay (PACE_PLAN, default $200)
   │       └ priced at list rates, per token class
   └ input + output + cache writes + cache reads, all time
 ```
@@ -77,7 +77,7 @@ On a terminal it asks two questions first, defaulting to whatever you already ha
 re-running it to change one answer won't reset the other:
 
 ```
-show the token odometer (⚡ 15.6B ≈ $11.8k)? [Y/n]
+show the token odometer (⚡ 8.17B ≈ $5.87k)? [Y/n]
 monthly plan cost, for the × plan comparison? [200]
 ```
 
@@ -127,7 +127,7 @@ Set these in the `command` itself (e.g. `PACE_ALERT=5 bash ~/.claude/statusline-
 | `PACE_COST` | `1` | Set to `0` for the token count without the dollar figure |
 | `PACE_PLAN` | `200` | What you pay per month, for the `× plan` multiple. `0` hides it |
 | `PACE_TOKENS_DIR` | `~/.claude/projects` | Where transcripts are read from |
-| `PACE_CACHE` | `~/.claude/.cache/pace-tokens.tsv` | Odometer cache location |
+| `PACE_CACHE` | `~/.claude/.cache/pace-tokens.tsv` | Odometer cache. The `.idx` and `.sum` files beside it are derived from it |
 | `PACE_RATE_IN` etc. | Opus list rates | `PACE_RATE_IN`, `_OUT`, `_W5`, `_W1`, `_READ`, in dollars per million tokens — override to price against a different model |
 | `NO_COLOR` | unset | Set to anything to disable color |
 
@@ -153,10 +153,21 @@ tail of the one live session, which takes milliseconds. The number is therefore 
 one prompt stale, which for an odometer is not a meaningful distinction. The very first
 run has no cache and simply omits the segment while the initial scan runs behind it.
 
+Messages are counted once each, not once per file they appear in. This matters more than
+it sounds: resuming a session copies the earlier conversation into the new transcript, so
+a single assistant message can be physically present in a dozen `.jsonl` files. Summing
+files rather than messages inflated the total by 90% on the author's own history. Each
+message is therefore banked under its `message.id` in a side index, and an id already
+banked is skipped however many copies of it turn up.
+
+One consequence: an id stays banked even if you later delete the transcript it came from,
+so the total is a high-water mark and never runs backwards when you tidy up.
+
 A transcript being written to mid-refresh ends in a half-written line; only whole lines
 are counted, and the stored byte offset advances only over those, so the fragment is
-picked up once it is complete. A file shorter than its recorded offset was truncated or
-replaced, and is rescanned from zero.
+picked up once it is complete. Lines are parsed individually, so one corrupt line is
+skipped rather than wedging that file forever. A file shorter than its recorded offset was
+truncated or replaced, and is rescanned from zero.
 
 Because it only counts what is still on disk, the total is a floor: deleted transcripts,
 sessions from before a `~/.claude` reset, and work on other machines are not in it.
